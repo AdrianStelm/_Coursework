@@ -1,146 +1,148 @@
-import os
-import socket
-import threading
 from kivy.app import App
-from kivy.uix.button import Button
+from kivy.uix.filechooser import FileChooserListView
 from kivy.uix.boxlayout import BoxLayout
-from kivy.uix.filechooser import FileChooserIconView
+from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.popup import Popup
 from kivy.uix.textinput import TextInput
-from tqdm import tqdm
+from kivy.uix.spinner import Spinner
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import hashes, hmac
+import os
 
-# Конфігурація для передачі файлів
-BUFFER_SIZE = 4096
-SEPARATOR = "<SEPARATOR>"
-SERVER_PORT = 5001
-BROADCAST_PORT = 5002
-
-class FileTransferApp(App):
+class FileEncryptorApp(App):
     def build(self):
-        layout = BoxLayout(orientation='vertical')
+        layout = BoxLayout(orientation='vertical', padding=10, spacing=10)
+        
+        self.file_chooser = FileChooserListView()
+        layout.add_widget(self.file_chooser)
 
-        # Кнопка "Я отримувач"
-        receiver_button = Button(text='Я отримувач', size_hint=(1, 0.5))
-        receiver_button.bind(on_press=self.start_receiver)
+        self.spinner = Spinner(
+            text='Choose encryption method',
+            values=('AES', 'DES'),
+            size_hint=(None, None), size=(200, 44))
+        layout.add_widget(self.spinner)
 
-        # Кнопка "Я відправник"
-        sender_button = Button(text='Я відправник', size_hint=(1, 0.5))
-        sender_button.bind(on_press=self.select_file)
+        self.key_input = TextInput(hint_text='Enter encryption key', multiline=False)
+        layout.add_widget(self.key_input)
 
-        layout.add_widget(receiver_button)
-        layout.add_widget(sender_button)
+        self.encrypt_button = Button(text='Encrypt Files')
+        self.encrypt_button.bind(on_press=self.encrypt_files)
+        layout.add_widget(self.encrypt_button)
+
+        self.decrypt_button = Button(text='Decrypt Files')
+        self.decrypt_button.bind(on_press=self.decrypt_files)
+        layout.add_widget(self.decrypt_button)
 
         return layout
 
-    # Функція для старту отримувача
-    def start_receiver(self, instance):
-        threading.Thread(target=self.listen_for_sender, daemon=True).start()
+    def encrypt_files(self, instance):
+        selected_files = self.file_chooser.selection
+        if not selected_files:
+            self.show_popup("Error", "No file selected!")
+            return
 
-        popup = Popup(title='Отримувач',
-                      content=Label(text='Очікування на файл...'),
-                      size_hint=(0.8, 0.8))
+        key = self.key_input.text
+        if not key:
+            self.show_popup("Error", "Please enter a key!")
+            return
+
+        if self.spinner.text == 'AES':
+            key = self.prepare_key(key, length=32)
+            iv = os.urandom(16)
+            encryptor = Cipher(algorithms.AES(key), modes.CFB(iv), backend=default_backend()).encryptor()
+        else:
+            key = self.prepare_key(key, length=8)
+            iv = os.urandom(8)
+            encryptor = Cipher(algorithms.DES(key), modes.CFB(iv), backend=default_backend()).encryptor()
+
+        for file_path in selected_files:
+            with open(file_path, 'rb') as f:
+                plaintext = f.read()
+
+            ciphertext = encryptor.update(plaintext) + encryptor.finalize()
+
+            # Генеруємо HMAC для контролю правильності дешифрування
+            h = hmac.HMAC(key, hashes.SHA256(), backend=default_backend())
+            h.update(ciphertext)
+            hmac_digest = h.finalize()
+
+            # Додаємо спеціальний заголовок "ENCRYPTED" для зашифрованого файлу
+            header = b"ENCRYPTED"
+
+            # Створюємо зашифрований файл
+            new_file_path = f"{file_path}.enc"
+            with open(new_file_path, 'wb') as f:
+                f.write(header + iv + ciphertext + hmac_digest)  # Додаємо заголовок, IV і HMAC до файлу
+
+            self.show_popup("Success", f"Files successfully encrypted! Saved as {new_file_path}")
+
+    def decrypt_files(self, instance):
+        selected_files = self.file_chooser.selection
+        if not selected_files:
+            self.show_popup("Error", "No file selected!")
+            return
+
+        key = self.key_input.text
+        if not key:
+            self.show_popup("Error", "Please enter a key!")
+            return
+
+        if self.spinner.text == 'AES':
+            key = self.prepare_key(key, length=32)
+            block_size = 16
+        else:
+            key = self.prepare_key(key, length=8)
+            block_size = 8
+
+        for file_path in selected_files:
+            with open(file_path, 'rb') as f:
+                header = f.read(9)  # Читаємо перші 9 байт (довжина "ENCRYPTED")
+                
+                # Перевіряємо, чи файл зашифрований
+                if header != b"ENCRYPTED":
+                    self.show_popup("Error", "This file is not encrypted!")
+                    return
+                
+                iv = f.read(block_size)
+                data = f.read()  # Читаємо решту файлу
+
+                # Відокремлюємо зашифрований контент та HMAC
+                ciphertext = data[:-32]  # Все, крім останніх 32 байт, це зашифровані дані
+                hmac_stored = data[-32:]  # Останні 32 байти — це збережений HMAC
+
+            # Ініціалізуємо дешифратор
+            decryptor = Cipher(algorithms.AES(key), modes.CFB(iv), backend=default_backend()).decryptor() if self.spinner.text == 'AES' else Cipher(algorithms.DES(key), modes.CFB(iv), backend=default_backend()).decryptor()
+
+            try:
+                plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+
+                # Перевіряємо HMAC
+                h = hmac.HMAC(key, hashes.SHA256(), backend=default_backend())
+                h.update(ciphertext)
+                h.verify(hmac_stored)  # Перевіряємо, чи співпадає HMAC
+
+# Зберігаємо розшифрований файл
+                file_name, file_extension = os.path.splitext(file_path)
+                original_file_path = f"{file_name}_decrypted{file_extension}"
+                with open(original_file_path, 'wb') as f:
+                    f.write(plaintext)
+
+                self.show_popup("Success", f"Files successfully decrypted! Saved as {original_file_path}")
+            except Exception as e:
+                self.show_popup("Error", "Invalid key or corrupted file! Cannot decrypt.")
+
+    def prepare_key(self, key, length):
+        # Підгонка ключа до потрібної довжини
+        key_bytes = key.encode('utf-8')
+        if len(key_bytes) < length:
+            return key_bytes.ljust(length, b'\0')
+        return key_bytes[:length]
+
+    def show_popup(self, title, message):
+        popup = Popup(title=title, content=Label(text=message), size_hint=(None, None), size=(400, 200))
         popup.open()
-
-    # Слухач для отримувача
-    def listen_for_sender(self):
-        udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        udp_socket.bind(('', BROADCAST_PORT))
-
-        print("Очікування мовлення від відправника...")
-        while True:
-            message, address = udp_socket.recvfrom(1024)
-            if message.decode() == 'FIND_RECEIVER':
-                print(f"Відправник знайдено на {address}")
-                udp_socket.sendto('RECEIVER_FOUND'.encode(), address)
-
-                # Приймаємо файл через TCP
-                threading.Thread(target=self.receive_file, args=(address[0],), daemon=True).start()
-
-    # Прийом файлу
-    def receive_file(self, sender_ip):
-        tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        tcp_socket.bind(('', SERVER_PORT))
-        tcp_socket.listen(1)
-        print(f"Очікування з'єднання на {sender_ip}:{SERVER_PORT}...")
-
-        client_socket, _ = tcp_socket.accept()
-        print("З'єднання встановлено!")
-
-        received = client_socket.recv(BUFFER_SIZE).decode()
-        filename, filesize = received.split(SEPARATOR)
-        filename = os.path.basename(filename)
-        filesize = int(filesize)
-
-        # Прогрес отримання
-        progress = tqdm(range(filesize), f"Отримання {filename}", unit="B", unit_scale=True, unit_divisor=1024)
-        with open(filename, "wb") as f:
-            while True:
-                bytes_read = client_socket.recv(BUFFER_SIZE)
-                if not bytes_read:
-                    break
-                f.write(bytes_read)
-                progress.update(len(bytes_read))
-
-        client_socket.close()
-        tcp_socket.close()
-        print(f"Файл {filename} отримано успішно!")
-
-    # Вибір файлу для відправника
-    def select_file(self, instance):
-        filechooser = FileChooserIconView()
-        popup = Popup(title='Виберіть файл',
-                      content=filechooser,
-                      size_hint=(0.9, 0.9))
-        filechooser.bind(on_submit=self.find_receiver)
-        popup.open()
-
-    # Пошук отримувача через UDP
-    def find_receiver(self, filechooser, selection, *args):
-        filename = selection[0]
-        threading.Thread(target=self.broadcast_and_send, args=(filename,), daemon=True).start()
-
-    # Мовлення UDP і відправка файлу
-    def broadcast_and_send(self, filename):
-        udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-
-        print("Пошук отримувача...")
-        udp_socket.sendto('FIND_RECEIVER'.encode(), ('<broadcast>', BROADCAST_PORT))
-
-        udp_socket.settimeout(5)
-        try:
-            message, address = udp_socket.recvfrom(1024)
-            if message.decode() == 'RECEIVER_FOUND':
-                print(f"Отримувач знайдено на {address[0]}")
-                self.send_file(filename, address[0])
-        except socket.timeout:
-            print("Отримувача не знайдено.")
-
-        udp_socket.close()
-
-    # Відправка файлу через TCP
-    def send_file(self, filename, receiver_ip):
-        filesize = os.path.getsize(filename)
-        tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        tcp_socket.connect((receiver_ip, SERVER_PORT))
-
-        # Відправляємо метадані про файл
-        tcp_socket.send(f"{filename}{SEPARATOR}{filesize}".encode())
-
-        # Прогрес передачі
-        progress = tqdm(range(filesize), f"Надсилання {filename}", unit="B", unit_scale=True, unit_divisor=1024)
-        with open(filename, "rb") as f:
-            while True:
-                bytes_read = f.read(BUFFER_SIZE)
-                if not bytes_read:
-                    break
-                tcp_socket.sendall(bytes_read)
-                progress.update(len(bytes_read))
-
-        tcp_socket.close()
-        print(f"Файл {filename} успішно надіслано!")
 
 if __name__ == '__main__':
-    FileTransferApp().run()
+    FileEncryptorApp().run()
