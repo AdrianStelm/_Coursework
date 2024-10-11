@@ -13,6 +13,9 @@ from tqdm import tqdm
 BUFFER_SIZE = 4096
 SEPARATOR = "<SEPARATOR>"
 SERVER_PORT = 5001
+BROADCAST_PORT = 5002
+BROADCAST_ADDR = "255.255.255.255"  # Адреса для широкомовлення
+
 
 class FileTransferApp(App):
     def build(self):
@@ -44,11 +47,24 @@ class FileTransferApp(App):
         local_ip = socket.gethostbyname(socket.gethostname())
         print(f"Очікування з'єднання на {local_ip}:{SERVER_PORT}...")
 
-        # Запуск сервера для приймання файлів
-        server_socket = socket.socket()
+        # Створення сервера для приймання файлів
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.bind((local_ip, SERVER_PORT))
         server_socket.listen(1)
 
+        # Відповідь на широкомовлення (UDP Broadcast)
+        udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        udp_socket.bind((local_ip, BROADCAST_PORT))
+
+        while True:
+            message, client_address = udp_socket.recvfrom(1024)
+            if message.decode() == "DISCOVER":
+                print(f"Запит від {client_address}. Відправляємо відповідь з IP.")
+                udp_socket.sendto(f"{local_ip}".encode(), client_address)
+                break
+
+        # Прийом файлу
         client_socket, address = server_socket.accept()
         print(f"З'єднання з {address}")
 
@@ -83,14 +99,31 @@ class FileTransferApp(App):
     def send_file(self, filechooser, selection, *args):
         filepath = selection[0]
         filesize = os.path.getsize(filepath)
-        ip_input = 'Введіть IP отримувача в локальній мережі: '
-        receiver_ip = input(ip_input)  # Введення IP-адреси отримувача
 
-        threading.Thread(target=self.run_sender, args=(filepath, filesize, receiver_ip), daemon=True).start()
+        # Автоматичне виявлення отримувача через UDP Broadcast
+        receiver_ip = self.discover_receiver()
+        if receiver_ip:
+            threading.Thread(target=self.run_sender, args=(filepath, filesize, receiver_ip), daemon=True).start()
+
+    def discover_receiver(self):
+        # Надсилаємо широкомовний запит на локальну мережу
+        udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        udp_socket.settimeout(5)
+
+        try:
+            udp_socket.sendto("DISCOVER".encode(), (BROADCAST_ADDR, BROADCAST_PORT))
+            print("Широкомовний запит відправлено, очікування відповіді...")
+            message, server_address = udp_socket.recvfrom(1024)
+            print(f"Виявлено отримувача з IP: {server_address[0]}")
+            return server_address[0]
+        except socket.timeout:
+            print("Час очікування відповіді вийшов. Отримувача не знайдено.")
+            return None
 
     def run_sender(self, filepath, filesize, receiver_ip):
         # Підключення до отримувача і передача файлу
-        client_socket = socket.socket()
+        client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         client_socket.connect((receiver_ip, SERVER_PORT))
 
         # Відправляємо файл
@@ -107,6 +140,7 @@ class FileTransferApp(App):
 
         client_socket.close()
         print(f"Файл {filepath} успішно надіслано!")
+
 
 if __name__ == '__main__':
     FileTransferApp().run()
