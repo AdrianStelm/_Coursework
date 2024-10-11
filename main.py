@@ -7,13 +7,11 @@ from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.filechooser import FileChooserIconView
 from kivy.uix.label import Label
 from kivy.uix.popup import Popup
-from kivy.core.window import Window
 from tqdm import tqdm
 
 # Конфігурація для передачі файлів
 BUFFER_SIZE = 4096
 SEPARATOR = "<SEPARATOR>"
-SERVER_HOST = '0.0.0.0'
 SERVER_PORT = 5001
 
 class FileTransferApp(App):
@@ -42,11 +40,14 @@ class FileTransferApp(App):
         popup.open()
 
     def run_receiver(self):
+        # Отримання локальної IP-адреси пристрою
+        local_ip = socket.gethostbyname(socket.gethostname())
+        print(f"Очікування з'єднання на {local_ip}:{SERVER_PORT}...")
+
         # Запуск сервера для приймання файлів
         server_socket = socket.socket()
-        server_socket.bind((SERVER_HOST, SERVER_PORT))
+        server_socket.bind((local_ip, SERVER_PORT))
         server_socket.listen(1)
-        print(f"Очікування з'єднання на {SERVER_HOST}:{SERVER_PORT}...")
 
         client_socket, address = server_socket.accept()
         print(f"З'єднання з {address}")
@@ -82,10 +83,10 @@ class FileTransferApp(App):
     def send_file(self, filechooser, selection, *args):
         filepath = selection[0]
         filesize = os.path.getsize(filepath)
-        ip_input = 'Введіть IP отримувача'
-        ip = input(ip_input)
+        ip_input = 'Введіть IP отримувача в локальній мережі: '
+        receiver_ip = input(ip_input)  # Введення IP-адреси отримувача
 
-        threading.Thread(target=self.run_sender, args=(filepath, filesize, ip), daemon=True).start()
+        threading.Thread(target=self.run_sender, args=(filepath, filesize, receiver_ip), daemon=True).start()
 
     def run_sender(self, filepath, filesize, receiver_ip):
         # Підключення до отримувача і передача файлу
